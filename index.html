@@ -1,0 +1,1616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!--
+    ============================================================
+    VIEWPORT META TAG
+    ============================================================
+    - width=device-width: Match screen width (essential for mobile)
+    - initial-scale=1.0: Don't zoom in/out by default
+    - user-scalable=no: Prevent pinch-to-zoom (avoid accidental zooms during workout)
+    - maximum-scale=1.0: Extra insurance against zooming
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+    
+    <!--
+    ============================================================
+    PWA META TAGS
+    ============================================================
+    These let the app work more like a native app when added to home screen
+    -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0a0a0a">
+    
+    <title>Cable Rep Tracker</title>
+    
+    <!--
+    ============================================================
+    CHART.JS LIBRARY
+    ============================================================
+    We're using Chart.js for graphing rep times
+    It's lightweight (~60kb) and handles real-time updates well
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <style>
+        /*
+        ============================================================
+        CSS CUSTOM PROPERTIES (VARIABLES)
+        ============================================================
+        Define colors once, use everywhere. Makes theming easy.
+        */
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #141414;
+            --bg-tertiary: #1e1e1e;
+            --accent-primary: #00ff88;      /* Bright green - success/active */
+            --accent-secondary: #00ccff;    /* Cyan - info/secondary */
+            --accent-warning: #ffaa00;      /* Orange - warnings */
+            --accent-danger: #ff4444;       /* Red - errors/stop */
+            --text-primary: #ffffff;
+            --text-secondary: #888888;
+            --text-muted: #555555;
+            --border-color: #2a2a2a;
+            --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            --font-main: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+        }
+
+        /*
+        ============================================================
+        CSS RESET & BASE STYLES
+        ============================================================
+        */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden; /* Prevent scrolling during workout */
+        }
+
+        body {
+            font-family: var(--font-main);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.5;
+            
+            /* Prevent text selection during workout */
+            -webkit-user-select: none;
+            user-select: none;
+            
+            /* Prevent pull-to-refresh on mobile */
+            overscroll-behavior: none;
+        }
+
+        /*
+        ============================================================
+        APP CONTAINER
+        ============================================================
+        Flexbox layout to center content and manage screen states
+        */
+        .app {
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /*
+        ============================================================
+        SCREEN STATES
+        ============================================================
+        Each "screen" is a full-height section that we show/hide
+        */
+        .screen {
+            display: none;
+            flex-direction: column;
+            height: 100%;
+            padding: 20px;
+            padding-top: max(20px, env(safe-area-inset-top)); /* iPhone notch */
+            padding-bottom: max(20px, env(safe-area-inset-bottom));
+        }
+
+        .screen.active {
+            display: flex;
+        }
+
+        /*
+        ============================================================
+        HEADER
+        ============================================================
+        */
+        .header {
+            text-align: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+        }
+
+        .header .subtitle {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            margin-top: 4px;
+        }
+
+        /*
+        ============================================================
+        BUTTONS
+        ============================================================
+        */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 16px 32px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            -webkit-tap-highlight-color: transparent; /* Remove tap highlight on mobile */
+        }
+
+        .btn-primary {
+            background: var(--accent-primary);
+            color: var(--bg-primary);
+        }
+
+        .btn-primary:active {
+            transform: scale(0.98);
+            background: #00dd77;
+        }
+
+        .btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-danger {
+            background: var(--accent-danger);
+            color: white;
+        }
+
+        .btn-large {
+            width: 100%;
+            padding: 20px;
+            font-size: 1.125rem;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /*
+        ============================================================
+        SETUP SCREEN
+        ============================================================
+        */
+        .setup-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 24px;
+        }
+
+        .instruction-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 20px;
+        }
+
+        .instruction-step {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .instruction-step:last-child {
+            margin-bottom: 0;
+        }
+
+        .step-number {
+            width: 32px;
+            height: 32px;
+            background: var(--accent-primary);
+            color: var(--bg-primary);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.875rem;
+            flex-shrink: 0;
+        }
+
+        .step-text {
+            flex: 1;
+        }
+
+        .step-text h3 {
+            font-size: 1rem;
+            margin-bottom: 4px;
+        }
+
+        .step-text p {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+
+        /*
+        ============================================================
+        TRACKING SCREEN
+        ============================================================
+        */
+        .tracking-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .rep-counter {
+            text-align: center;
+            padding: 30px 0;
+        }
+
+        .rep-count {
+            font-size: 6rem;
+            font-weight: 700;
+            font-family: var(--font-mono);
+            color: var(--accent-primary);
+            line-height: 1;
+            /* Tabular numbers so width doesn't change */
+            font-variant-numeric: tabular-nums;
+        }
+
+        .rep-label {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-top: 8px;
+        }
+
+        .stats-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            color: var(--accent-secondary);
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-top: 4px;
+        }
+
+        .chart-container {
+            flex: 1;
+            min-height: 200px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+
+        .tracking-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .tracking-actions .btn {
+            flex: 1;
+        }
+
+        /*
+        ============================================================
+        RESULTS SCREEN
+        ============================================================
+        */
+        .results-summary {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .summary-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            text-align: center;
+        }
+
+        .summary-card.highlight {
+            border-color: var(--accent-primary);
+            background: linear-gradient(135deg, rgba(0, 255, 136, 0.1), transparent);
+        }
+
+        .summary-big-number {
+            font-size: 4rem;
+            font-weight: 700;
+            font-family: var(--font-mono);
+            color: var(--accent-primary);
+        }
+
+        .summary-label {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            margin-top: 8px;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .summary-item {
+            background: var(--bg-tertiary);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .summary-item-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            font-family: var(--font-mono);
+        }
+
+        .summary-item-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        /*
+        ============================================================
+        DEBUG PANEL
+        ============================================================
+        Collapsible panel for development/tuning
+        */
+        .debug-panel {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            max-height: 40vh;
+            overflow-y: auto;
+            transform: translateY(calc(100% - 40px));
+            transition: transform 0.3s ease;
+            z-index: 100;
+        }
+
+        .debug-panel.open {
+            transform: translateY(0);
+        }
+
+        .debug-toggle {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 16px;
+            cursor: pointer;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .debug-content {
+            padding: 12px 16px;
+        }
+
+        .debug-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .debug-label {
+            color: var(--text-secondary);
+        }
+
+        .debug-value {
+            color: var(--accent-secondary);
+        }
+
+        .debug-value.positive {
+            color: var(--accent-primary);
+        }
+
+        .debug-value.negative {
+            color: var(--accent-danger);
+        }
+
+        /*
+        ============================================================
+        STATUS INDICATOR
+        ============================================================
+        Shows current state (calibrating, tracking, etc.)
+        */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .status-badge.calibrating {
+            background: rgba(255, 170, 0, 0.2);
+            color: var(--accent-warning);
+        }
+
+        .status-badge.tracking {
+            background: rgba(0, 255, 136, 0.2);
+            color: var(--accent-primary);
+        }
+
+        .status-badge::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /*
+        ============================================================
+        LIVE SIGNAL VISUALIZER
+        ============================================================
+        A simple bar showing current acceleration
+        */
+        .signal-bar-container {
+            height: 40px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            margin-bottom: 20px;
+        }
+
+        .signal-bar {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            width: 4px;
+            background: var(--accent-primary);
+            transition: transform 0.05s ease-out;
+            transform-origin: center;
+        }
+
+        .signal-bar-center {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            width: 2px;
+            background: var(--text-muted);
+            transform: translateX(-50%);
+        }
+
+        /*
+        ============================================================
+        CALIBRATION OVERLAY
+        ============================================================
+        */
+        .calibration-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .calibration-overlay.hidden {
+            display: none;
+        }
+
+        .calibration-spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid var(--border-color);
+            border-top-color: var(--accent-primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 24px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .calibration-text {
+            font-size: 1.25rem;
+            margin-bottom: 8px;
+        }
+
+        .calibration-subtext {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+    </style>
+</head>
+<body>
+    <!--
+    ============================================================
+    MAIN APP CONTAINER
+    ============================================================
+    -->
+    <div class="app">
+        <!--
+        ============================================================
+        SCREEN 1: SETUP
+        ============================================================
+        Initial screen where user sets up and starts tracking
+        -->
+        <div id="setupScreen" class="screen active">
+            <div class="header">
+                <h1>Cable Rep Tracker</h1>
+                <p class="subtitle">Use your phone to count reps</p>
+            </div>
+            
+            <div class="setup-content">
+                <div class="instruction-card">
+                    <div class="instruction-step">
+                        <div class="step-number">1</div>
+                        <div class="step-text">
+                            <h3>Position Your Phone</h3>
+                            <p>Place or strap your phone securely on the weight stack. Screen can face any direction.</p>
+                        </div>
+                    </div>
+                    <div class="instruction-step">
+                        <div class="step-number">2</div>
+                        <div class="step-text">
+                            <h3>Keep Still</h3>
+                            <p>Don't touch the weights for 2 seconds while we calibrate the sensors.</p>
+                        </div>
+                    </div>
+                    <div class="instruction-step">
+                        <div class="step-number">3</div>
+                        <div class="step-text">
+                            <h3>Do Your Set</h3>
+                            <p>Perform your reps at a steady pace. We'll count and time each one.</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <button id="startBtn" class="btn btn-primary btn-large">
+                    Start Tracking
+                </button>
+                
+                <p style="text-align: center; color: var(--text-secondary); font-size: 0.75rem;">
+                    Requires motion sensor access
+                </p>
+            </div>
+        </div>
+
+        <!--
+        ============================================================
+        SCREEN 2: TRACKING
+        ============================================================
+        Active tracking screen with live rep count and chart
+        -->
+        <div id="trackingScreen" class="screen">
+            <div class="tracking-header">
+                <span class="status-badge tracking">Tracking</span>
+                <span id="setTimer" style="font-family: var(--font-mono); color: var(--text-secondary);">00:00</span>
+            </div>
+
+            <div class="rep-counter">
+                <div id="repCount" class="rep-count">0</div>
+                <div class="rep-label">Reps</div>
+            </div>
+
+            <div class="stats-row">
+                <div class="stat-card">
+                    <div id="lastRepTime" class="stat-value">--</div>
+                    <div class="stat-label">Last Rep (s)</div>
+                </div>
+                <div class="stat-card">
+                    <div id="avgRepTime" class="stat-value">--</div>
+                    <div class="stat-label">Avg Rep (s)</div>
+                </div>
+            </div>
+
+            <!-- Live signal visualization -->
+            <div class="signal-bar-container">
+                <div class="signal-bar-center"></div>
+                <div id="signalBar" class="signal-bar"></div>
+            </div>
+
+            <!-- Rep time chart -->
+            <div class="chart-container">
+                <canvas id="repChart"></canvas>
+            </div>
+
+            <div class="tracking-actions">
+                <button id="stopBtn" class="btn btn-danger">
+                    Stop Set
+                </button>
+            </div>
+        </div>
+
+        <!--
+        ============================================================
+        SCREEN 3: RESULTS
+        ============================================================
+        Post-set summary with stats
+        -->
+        <div id="resultsScreen" class="screen">
+            <div class="header">
+                <h1>Set Complete!</h1>
+            </div>
+
+            <div class="results-summary">
+                <div class="summary-card highlight">
+                    <div id="finalRepCount" class="summary-big-number">0</div>
+                    <div class="summary-label">Total Reps</div>
+                </div>
+
+                <div class="summary-grid">
+                    <div class="summary-item">
+                        <div id="finalSetDuration" class="summary-item-value">--</div>
+                        <div class="summary-item-label">Set Duration</div>
+                    </div>
+                    <div class="summary-item">
+                        <div id="finalAvgRep" class="summary-item-value">--</div>
+                        <div class="summary-item-label">Avg Rep Time</div>
+                    </div>
+                    <div class="summary-item">
+                        <div id="finalFastestRep" class="summary-item-value">--</div>
+                        <div class="summary-item-label">Fastest Rep</div>
+                    </div>
+                    <div class="summary-item">
+                        <div id="finalSlowestRep" class="summary-item-value">--</div>
+                        <div class="summary-item-label">Slowest Rep</div>
+                    </div>
+                </div>
+
+                <!-- Chart showing all rep times -->
+                <div class="chart-container" style="flex: 1;">
+                    <canvas id="resultsChart"></canvas>
+                </div>
+
+                <button id="newSetBtn" class="btn btn-primary btn-large">
+                    Start New Set
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!--
+    ============================================================
+    CALIBRATION OVERLAY
+    ============================================================
+    Shows during the calibration phase
+    -->
+    <div id="calibrationOverlay" class="calibration-overlay hidden">
+        <div class="calibration-spinner"></div>
+        <div class="calibration-text">Calibrating Sensors...</div>
+        <div class="calibration-subtext">Hold still for 2 seconds</div>
+    </div>
+
+    <!--
+    ============================================================
+    DEBUG PANEL
+    ============================================================
+    Toggle this to see raw sensor data (helpful for tuning)
+    -->
+    <div id="debugPanel" class="debug-panel">
+        <div class="debug-toggle" onclick="toggleDebug()">
+            <span>Debug Panel</span>
+            <span id="debugArrow">▲</span>
+        </div>
+        <div class="debug-content">
+            <div class="debug-row">
+                <span class="debug-label">Raw Accel (vertical)</span>
+                <span id="debugRawAccel" class="debug-value">--</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">Filtered Accel</span>
+                <span id="debugFilteredAccel" class="debug-value">--</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">Delta from baseline</span>
+                <span id="debugDelta" class="debug-value">--</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">Vertical Axis</span>
+                <span id="debugAxis" class="debug-value">--</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">Baseline Value</span>
+                <span id="debugBaseline" class="debug-value">--</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">Movement State</span>
+                <span id="debugState" class="debug-value">--</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">Threshold</span>
+                <span id="debugThreshold" class="debug-value">--</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /*
+        ============================================================
+        JAVASCRIPT - THE BRAIN OF THE APP
+        ============================================================
+        
+        This is where all the logic lives. I've organized it into sections:
+        1. Configuration & State
+        2. DOM References
+        3. Utility Functions
+        4. Sensor Handling
+        5. Calibration
+        6. Rep Detection
+        7. UI Updates
+        8. Screen Management
+        9. Initialization
+        */
+
+        // ============================================================
+        // SECTION 1: CONFIGURATION & STATE
+        // ============================================================
+        
+        /*
+        Configuration values - tweak these to tune sensitivity
+        These are the "magic numbers" you'll adjust based on testing
+        */
+        const CONFIG = {
+            // Calibration settings
+            CALIBRATION_SAMPLES: 60,      // Number of samples to collect (at ~60fps = 1 second)
+            CALIBRATION_DURATION: 2000,   // How long to show calibration overlay (ms)
+            
+            // Signal processing
+            FILTER_ALPHA: 0.15,           // Low-pass filter strength (0-1, lower = smoother)
+            
+            // Rep detection thresholds
+            MOVEMENT_THRESHOLD: 1.2,      // m/s² change needed to detect movement
+            REST_THRESHOLD_MULTIPLIER: 0.4, // Multiplier for detecting return to rest
+            
+            // Timing constraints
+            MIN_REP_DURATION: 400,        // Minimum time for a rep (ms) - prevents double-counting
+            DEBOUNCE_TIME: 150,           // Minimum time between state changes (ms)
+            
+            // Debug
+            DEBUG_ENABLED: true           // Show debug panel
+        };
+
+        /*
+        Application state - all mutable state lives here
+        Keeping state in one place makes debugging easier
+        */
+        const state = {
+            // App state
+            currentScreen: 'setup',       // 'setup' | 'tracking' | 'results'
+            isTracking: false,
+            
+            // Calibration
+            isCalibrating: false,
+            calibrationSamples: [],
+            calibration: {
+                verticalAxis: 'y',        // Which axis is vertical ('x', 'y', or 'z')
+                axisSign: 1,              // 1 or -1 (direction of gravity on that axis)
+                baselineValue: 9.8,       // Gravity reading when at rest
+                threshold: CONFIG.MOVEMENT_THRESHOLD
+            },
+            
+            // Signal processing
+            filteredAccel: 0,             // Current filtered acceleration value
+            lastRawAccel: 0,              // Last raw reading (for debug)
+            
+            // Rep detection state machine
+            repState: 'IDLE',             // 'IDLE' | 'MOVING_UP' | 'MOVING_DOWN'
+            lastStateChange: 0,           // Timestamp of last state change (for debouncing)
+            repStartTime: null,           // When current rep started
+            
+            // Rep data
+            repCount: 0,
+            repTimes: [],                 // Array of rep durations in ms
+            setStartTime: null,           // When set started
+            
+            // Wake lock
+            wakeLock: null
+        };
+
+        // ============================================================
+        // SECTION 2: DOM REFERENCES
+        // ============================================================
+        
+        /*
+        Cache DOM elements for performance
+        querySelector is slow - do it once, not every frame
+        */
+        const DOM = {
+            // Screens
+            setupScreen: document.getElementById('setupScreen'),
+            trackingScreen: document.getElementById('trackingScreen'),
+            resultsScreen: document.getElementById('resultsScreen'),
+            
+            // Buttons
+            startBtn: document.getElementById('startBtn'),
+            stopBtn: document.getElementById('stopBtn'),
+            newSetBtn: document.getElementById('newSetBtn'),
+            
+            // Tracking display
+            repCount: document.getElementById('repCount'),
+            lastRepTime: document.getElementById('lastRepTime'),
+            avgRepTime: document.getElementById('avgRepTime'),
+            setTimer: document.getElementById('setTimer'),
+            signalBar: document.getElementById('signalBar'),
+            
+            // Results display
+            finalRepCount: document.getElementById('finalRepCount'),
+            finalSetDuration: document.getElementById('finalSetDuration'),
+            finalAvgRep: document.getElementById('finalAvgRep'),
+            finalFastestRep: document.getElementById('finalFastestRep'),
+            finalSlowestRep: document.getElementById('finalSlowestRep'),
+            
+            // Calibration
+            calibrationOverlay: document.getElementById('calibrationOverlay'),
+            
+            // Debug
+            debugPanel: document.getElementById('debugPanel'),
+            debugRawAccel: document.getElementById('debugRawAccel'),
+            debugFilteredAccel: document.getElementById('debugFilteredAccel'),
+            debugDelta: document.getElementById('debugDelta'),
+            debugAxis: document.getElementById('debugAxis'),
+            debugBaseline: document.getElementById('debugBaseline'),
+            debugState: document.getElementById('debugState'),
+            debugThreshold: document.getElementById('debugThreshold'),
+            debugArrow: document.getElementById('debugArrow')
+        };
+
+        // Chart instances (initialized later)
+        let repChart = null;
+        let resultsChart = null;
+
+        // ============================================================
+        // SECTION 3: UTILITY FUNCTIONS
+        // ============================================================
+
+        /*
+        Calculate average of an array of numbers
+        Returns 0 for empty arrays to avoid NaN
+        */
+        function average(arr) {
+            if (arr.length === 0) return 0;
+            return arr.reduce((sum, val) => sum + val, 0) / arr.length;
+        }
+
+        /*
+        Format milliseconds as MM:SS string
+        Used for the set timer display
+        */
+        function formatTime(ms) {
+            const totalSeconds = Math.floor(ms / 1000);
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+
+        /*
+        Format milliseconds as seconds with 1 decimal place
+        Used for rep times
+        */
+        function formatSeconds(ms) {
+            return (ms / 1000).toFixed(1);
+        }
+
+        /*
+        Low-pass filter using exponential moving average
+        
+        How it works:
+        - Each new value is blended with the previous smoothed value
+        - alpha controls the blend ratio
+        - Low alpha (0.1) = very smooth but laggy
+        - High alpha (0.5) = responsive but noisy
+        
+        Formula: smoothed = alpha * new + (1 - alpha) * previous
+        */
+        function lowPassFilter(newValue, previousSmoothed, alpha = CONFIG.FILTER_ALPHA) {
+            return alpha * newValue + (1 - alpha) * previousSmoothed;
+        }
+
+        /*
+        Trigger haptic feedback (vibration)
+        Not all devices support this, so we wrap in try/catch
+        */
+        function hapticFeedback(duration = 50) {
+            try {
+                if ('vibrate' in navigator) {
+                    navigator.vibrate(duration);
+                }
+            } catch (e) {
+                // Vibration not supported, fail silently
+            }
+        }
+
+        // ============================================================
+        // SECTION 4: SENSOR HANDLING
+        // ============================================================
+
+        /*
+        Request permission for motion sensors (required on iOS 13+)
+        
+        Important: This MUST be called from a user gesture (click/tap)
+        The browser will reject the request if called automatically
+        */
+        async function requestMotionPermission() {
+            // Check if we need to request permission (iOS)
+            if (typeof DeviceMotionEvent !== 'undefined' && 
+                typeof DeviceMotionEvent.requestPermission === 'function') {
+                try {
+                    const response = await DeviceMotionEvent.requestPermission();
+                    return response === 'granted';
+                } catch (error) {
+                    console.error('Motion permission error:', error);
+                    return false;
+                }
+            }
+            // Android and older iOS don't need permission
+            return true;
+        }
+
+        /*
+        Start listening to motion events
+        */
+        function startMotionListener() {
+            window.addEventListener('devicemotion', handleMotionEvent);
+        }
+
+        /*
+        Stop listening to motion events
+        */
+        function stopMotionListener() {
+            window.removeEventListener('devicemotion', handleMotionEvent);
+        }
+
+        /*
+        Main motion event handler - called ~60 times per second
+        
+        This is the heart of the app. Every time the phone reports
+        new sensor data, this function:
+        1. Extracts the acceleration value for our vertical axis
+        2. During calibration: collects samples
+        3. During tracking: processes the signal for rep detection
+        */
+        function handleMotionEvent(event) {
+            // Get acceleration data (including gravity)
+            const accel = event.accelerationIncludingGravity;
+            
+            // Safety check - some devices don't provide this data
+            if (!accel || accel.x === null) {
+                console.warn('No acceleration data available');
+                return;
+            }
+
+            // Extract the value for our vertical axis
+            const axisValue = accel[state.calibration.verticalAxis];
+            state.lastRawAccel = axisValue;
+
+            if (state.isCalibrating) {
+                // During calibration, just collect samples
+                state.calibrationSamples.push({
+                    x: accel.x,
+                    y: accel.y,
+                    z: accel.z
+                });
+            } else if (state.isTracking) {
+                // During tracking, process the signal
+                processMotionData(axisValue);
+            }
+        }
+
+        // ============================================================
+        // SECTION 5: CALIBRATION
+        // ============================================================
+
+        /*
+        Start the calibration process
+        
+        Calibration determines:
+        1. Which axis is vertical (where gravity is strongest)
+        2. The baseline value (gravity reading when still)
+        3. The sign (positive or negative direction)
+        */
+        async function startCalibration() {
+            state.isCalibrating = true;
+            state.calibrationSamples = [];
+            
+            // Show calibration overlay
+            DOM.calibrationOverlay.classList.remove('hidden');
+            
+            // Start collecting samples
+            startMotionListener();
+            
+            // Wait for calibration duration
+            await new Promise(resolve => setTimeout(resolve, CONFIG.CALIBRATION_DURATION));
+            
+            // Process collected samples
+            processCalibration();
+            
+            // Hide overlay and start tracking
+            DOM.calibrationOverlay.classList.add('hidden');
+            state.isCalibrating = false;
+        }
+
+        /*
+        Process calibration samples to determine vertical axis and baseline
+        */
+        function processCalibration() {
+            const samples = state.calibrationSamples;
+            
+            if (samples.length < 10) {
+                console.error('Not enough calibration samples');
+                alert('Calibration failed. Please try again and hold the phone still.');
+                return;
+            }
+
+            // Calculate average for each axis
+            const avgX = average(samples.map(s => s.x));
+            const avgY = average(samples.map(s => s.y));
+            const avgZ = average(samples.map(s => s.z));
+
+            console.log('Calibration averages:', { x: avgX, y: avgY, z: avgZ });
+
+            // Find which axis has the largest absolute value (that's gravity)
+            const absValues = [Math.abs(avgX), Math.abs(avgY), Math.abs(avgZ)];
+            const maxIndex = absValues.indexOf(Math.max(...absValues));
+            const axes = ['x', 'y', 'z'];
+            
+            state.calibration.verticalAxis = axes[maxIndex];
+            state.calibration.baselineValue = [avgX, avgY, avgZ][maxIndex];
+            state.calibration.axisSign = Math.sign(state.calibration.baselineValue);
+            state.calibration.threshold = CONFIG.MOVEMENT_THRESHOLD;
+
+            console.log('Calibration result:', state.calibration);
+            
+            // Update debug panel
+            DOM.debugAxis.textContent = state.calibration.verticalAxis.toUpperCase();
+            DOM.debugBaseline.textContent = state.calibration.baselineValue.toFixed(2);
+            DOM.debugThreshold.textContent = state.calibration.threshold.toFixed(2);
+        }
+
+        // ============================================================
+        // SECTION 6: REP DETECTION
+        // ============================================================
+
+        /*
+        Process incoming motion data for rep detection
+        
+        This implements a state machine with three states:
+        - IDLE: Waiting at rest position
+        - MOVING_UP: Weight is moving upward
+        - MOVING_DOWN: Weight is moving downward
+        
+        A complete rep is: IDLE -> MOVING_UP -> MOVING_DOWN -> IDLE
+        */
+        function processMotionData(rawAccel) {
+            // Apply low-pass filter to smooth out noise
+            state.filteredAccel = lowPassFilter(rawAccel, state.filteredAccel);
+            
+            // Calculate how much we've deviated from the baseline
+            // This is the key signal we use for detection
+            const delta = state.filteredAccel - state.calibration.baselineValue;
+            
+            // Threshold for detecting movement
+            const threshold = state.calibration.threshold;
+            const restThreshold = threshold * CONFIG.REST_THRESHOLD_MULTIPLIER;
+            
+            // Current time for debouncing
+            const now = Date.now();
+            
+            // Update debug panel
+            updateDebugPanel(rawAccel, state.filteredAccel, delta);
+            
+            // Update visual signal bar
+            updateSignalBar(delta, threshold);
+
+            // State machine for rep detection
+            switch (state.repState) {
+                case 'IDLE':
+                    /*
+                    In IDLE state, we're waiting for the weight to start moving.
+                    When acceleration exceeds threshold, transition to MOVING_UP.
+                    
+                    Note: We check delta * axisSign to handle both orientations
+                    (phone might be upside down)
+                    */
+                    if (Math.abs(delta) > threshold) {
+                        // Debounce check
+                        if (now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
+                            state.repState = 'MOVING_UP';
+                            state.repStartTime = now;
+                            state.lastStateChange = now;
+                            console.log('State: IDLE -> MOVING_UP');
+                        }
+                    }
+                    break;
+
+                case 'MOVING_UP':
+                    /*
+                    Weight is moving up. We're looking for the direction change
+                    that indicates we've reached the top and started coming down.
+                    
+                    The sign of delta will flip when this happens.
+                    */
+                    if (delta * state.calibration.axisSign < -threshold * 0.5) {
+                        if (now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
+                            state.repState = 'MOVING_DOWN';
+                            state.lastStateChange = now;
+                            console.log('State: MOVING_UP -> MOVING_DOWN');
+                        }
+                    }
+                    break;
+
+                case 'MOVING_DOWN':
+                    /*
+                    Weight is moving down. We're looking for return to rest
+                    (small delta) which completes the rep.
+                    */
+                    if (Math.abs(delta) < restThreshold) {
+                        // Check minimum rep duration to avoid false positives
+                        const repDuration = now - state.repStartTime;
+                        
+                        if (repDuration >= CONFIG.MIN_REP_DURATION && 
+                            now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
+                            // REP COMPLETE!
+                            state.repState = 'IDLE';
+                            state.lastStateChange = now;
+                            
+                            // Record the rep
+                            state.repCount++;
+                            state.repTimes.push(repDuration);
+                            
+                            console.log(`Rep ${state.repCount} complete: ${repDuration}ms`);
+                            
+                            // Update UI
+                            onRepComplete(state.repCount, repDuration);
+                        }
+                    }
+                    break;
+            }
+        }
+
+        /*
+        Called when a rep is successfully detected
+        Updates all the UI elements and chart
+        */
+        function onRepComplete(repNumber, durationMs) {
+            // Haptic feedback
+            hapticFeedback(100);
+            
+            // Update rep count display
+            DOM.repCount.textContent = repNumber;
+            DOM.repCount.style.transform = 'scale(1.1)';
+            setTimeout(() => DOM.repCount.style.transform = 'scale(1)', 150);
+            
+            // Update last rep time
+            DOM.lastRepTime.textContent = formatSeconds(durationMs);
+            
+            // Update average rep time
+            const avgMs = average(state.repTimes);
+            DOM.avgRepTime.textContent = formatSeconds(avgMs);
+            
+            // Update chart
+            updateRepChart(repNumber, durationMs);
+        }
+
+        // ============================================================
+        // SECTION 7: UI UPDATES
+        // ============================================================
+
+        /*
+        Update the debug panel with current values
+        */
+        function updateDebugPanel(raw, filtered, delta) {
+            if (!CONFIG.DEBUG_ENABLED) return;
+            
+            DOM.debugRawAccel.textContent = raw.toFixed(2);
+            DOM.debugFilteredAccel.textContent = filtered.toFixed(2);
+            DOM.debugDelta.textContent = delta.toFixed(2);
+            DOM.debugState.textContent = state.repState;
+            
+            // Color code the delta
+            DOM.debugDelta.className = 'debug-value';
+            if (delta > state.calibration.threshold) {
+                DOM.debugDelta.classList.add('positive');
+            } else if (delta < -state.calibration.threshold) {
+                DOM.debugDelta.classList.add('negative');
+            }
+        }
+
+        /*
+        Update the visual signal bar
+        Shows current acceleration as a bar moving left/right from center
+        */
+        function updateSignalBar(delta, threshold) {
+            // Map delta to pixel offset (max 100px either direction)
+            const maxOffset = 100;
+            const normalized = Math.max(-1, Math.min(1, delta / (threshold * 3)));
+            const offset = normalized * maxOffset;
+            
+            DOM.signalBar.style.transform = `translateX(${offset}px)`;
+            
+            // Color based on movement state
+            if (Math.abs(delta) > threshold) {
+                DOM.signalBar.style.background = 'var(--accent-primary)';
+            } else {
+                DOM.signalBar.style.background = 'var(--text-muted)';
+            }
+        }
+
+        /*
+        Update the set timer display
+        Called every 100ms while tracking
+        */
+        let timerInterval = null;
+
+        function startSetTimer() {
+            state.setStartTime = Date.now();
+            timerInterval = setInterval(() => {
+                const elapsed = Date.now() - state.setStartTime;
+                DOM.setTimer.textContent = formatTime(elapsed);
+            }, 100);
+        }
+
+        function stopSetTimer() {
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+        }
+
+        /*
+        Initialize the rep chart (tracking screen)
+        */
+        function initRepChart() {
+            const ctx = document.getElementById('repChart').getContext('2d');
+            
+            repChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Rep Time (s)',
+                        data: [],
+                        backgroundColor: 'rgba(0, 255, 136, 0.6)',
+                        borderColor: 'rgba(0, 255, 136, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false, // Disable for performance
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)'
+                            },
+                            ticks: {
+                                color: '#888'
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)'
+                            },
+                            ticks: {
+                                color: '#888'
+                            },
+                            title: {
+                                display: true,
+                                text: 'Seconds',
+                                color: '#888'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        /*
+        Add a new rep to the chart
+        */
+        function updateRepChart(repNumber, durationMs) {
+            repChart.data.labels.push(`${repNumber}`);
+            repChart.data.datasets[0].data.push(durationMs / 1000);
+            repChart.update('none'); // 'none' = no animation
+        }
+
+        /*
+        Reset the rep chart for a new set
+        */
+        function resetRepChart() {
+            repChart.data.labels = [];
+            repChart.data.datasets[0].data = [];
+            repChart.update();
+        }
+
+        /*
+        Initialize/update the results chart
+        */
+        function updateResultsChart() {
+            const ctx = document.getElementById('resultsChart').getContext('2d');
+            
+            // Destroy existing chart if it exists
+            if (resultsChart) {
+                resultsChart.destroy();
+            }
+            
+            resultsChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: state.repTimes.map((_, i) => `Rep ${i + 1}`),
+                    datasets: [{
+                        label: 'Rep Time (s)',
+                        data: state.repTimes.map(t => t / 1000),
+                        borderColor: 'rgba(0, 204, 255, 1)',
+                        backgroundColor: 'rgba(0, 204, 255, 0.2)',
+                        fill: true,
+                        tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)'
+                            },
+                            ticks: {
+                                color: '#888'
+                            }
+                        },
+                        y: {
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.1)'
+                            },
+                            ticks: {
+                                color: '#888'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // ============================================================
+        // SECTION 8: SCREEN MANAGEMENT
+        // ============================================================
+
+        /*
+        Switch between screens
+        */
+        function showScreen(screenName) {
+            // Hide all screens
+            DOM.setupScreen.classList.remove('active');
+            DOM.trackingScreen.classList.remove('active');
+            DOM.resultsScreen.classList.remove('active');
+            
+            // Show the requested screen
+            switch (screenName) {
+                case 'setup':
+                    DOM.setupScreen.classList.add('active');
+                    break;
+                case 'tracking':
+                    DOM.trackingScreen.classList.add('active');
+                    break;
+                case 'results':
+                    DOM.resultsScreen.classList.add('active');
+                    break;
+            }
+            
+            state.currentScreen = screenName;
+        }
+
+        /*
+        Request screen wake lock to prevent display from sleeping
+        */
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    state.wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('Wake lock acquired');
+                }
+            } catch (error) {
+                console.log('Wake lock not available:', error);
+            }
+        }
+
+        /*
+        Release the wake lock
+        */
+        function releaseWakeLock() {
+            if (state.wakeLock) {
+                state.wakeLock.release();
+                state.wakeLock = null;
+                console.log('Wake lock released');
+            }
+        }
+
+        /*
+        Start a new tracking session
+        */
+        async function startTracking() {
+            // Request motion permission
+            const hasPermission = await requestMotionPermission();
+            if (!hasPermission) {
+                alert('Motion sensor access is required. Please allow access and try again.');
+                return;
+            }
+
+            // Request wake lock
+            await requestWakeLock();
+
+            // Calibrate sensors
+            await startCalibration();
+
+            // Reset state for new set
+            state.repCount = 0;
+            state.repTimes = [];
+            state.repState = 'IDLE';
+            state.filteredAccel = state.calibration.baselineValue;
+            
+            // Reset UI
+            DOM.repCount.textContent = '0';
+            DOM.lastRepTime.textContent = '--';
+            DOM.avgRepTime.textContent = '--';
+            resetRepChart();
+
+            // Start tracking
+            state.isTracking = true;
+            showScreen('tracking');
+            startSetTimer();
+            
+            console.log('Tracking started');
+        }
+
+        /*
+        Stop the current tracking session and show results
+        */
+        function stopTracking() {
+            state.isTracking = false;
+            stopMotionListener();
+            stopSetTimer();
+            releaseWakeLock();
+            
+            // Calculate final stats
+            const setDuration = Date.now() - state.setStartTime;
+            const avgRepTime = average(state.repTimes);
+            const fastestRep = state.repTimes.length > 0 ? Math.min(...state.repTimes) : 0;
+            const slowestRep = state.repTimes.length > 0 ? Math.max(...state.repTimes) : 0;
+            
+            // Update results screen
+            DOM.finalRepCount.textContent = state.repCount;
+            DOM.finalSetDuration.textContent = formatTime(setDuration);
+            DOM.finalAvgRep.textContent = state.repTimes.length > 0 ? `${formatSeconds(avgRepTime)}s` : '--';
+            DOM.finalFastestRep.textContent = state.repTimes.length > 0 ? `${formatSeconds(fastestRep)}s` : '--';
+            DOM.finalSlowestRep.textContent = state.repTimes.length > 0 ? `${formatSeconds(slowestRep)}s` : '--';
+            
+            // Update results chart
+            updateResultsChart();
+            
+            showScreen('results');
+            console.log('Tracking stopped');
+        }
+
+        /*
+        Toggle debug panel open/closed
+        */
+        function toggleDebug() {
+            DOM.debugPanel.classList.toggle('open');
+            DOM.debugArrow.textContent = DOM.debugPanel.classList.contains('open') ? '▼' : '▲';
+        }
+
+        // Make toggleDebug available globally for onclick
+        window.toggleDebug = toggleDebug;
+
+        // ============================================================
+        // SECTION 9: INITIALIZATION
+        // ============================================================
+
+        /*
+        Set up event listeners and initialize the app
+        */
+        function init() {
+            // Button event listeners
+            DOM.startBtn.addEventListener('click', startTracking);
+            DOM.stopBtn.addEventListener('click', stopTracking);
+            DOM.newSetBtn.addEventListener('click', () => showScreen('setup'));
+            
+            // Initialize chart
+            initRepChart();
+            
+            // Hide debug panel if disabled
+            if (!CONFIG.DEBUG_ENABLED) {
+                DOM.debugPanel.style.display = 'none';
+            }
+            
+            console.log('Cable Rep Tracker initialized');
+        }
+
+        // Run initialization when DOM is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    </script>
+</body>
+</html>
