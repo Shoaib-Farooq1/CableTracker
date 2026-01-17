@@ -851,15 +851,18 @@
             CALIBRATION_DURATION: 2000,   // How long to show calibration overlay (ms)
             
             // Signal processing
-            FILTER_ALPHA: 0.15,           // Low-pass filter strength (0-1, lower = smoother)
+            FILTER_ALPHA: 0.12,           // Low-pass filter strength (lower = smoother, less twitchy)
             
-            // Rep detection thresholds
-            MOVEMENT_THRESHOLD: 1.2,      // m/s² change needed to detect movement
-            REST_THRESHOLD_MULTIPLIER: 0.4, // Multiplier for detecting return to rest
+            // Rep detection thresholds - TUNED FOR BALANCED SENSITIVITY
+            MOVEMENT_THRESHOLD: 1.8,      // m/s² change needed to detect movement (was 1.2)
             
             // Timing constraints
-            MIN_REP_DURATION: 400,        // Minimum time for a rep (ms) - prevents double-counting
-            DEBOUNCE_TIME: 150,           // Minimum time between state changes (ms)
+            MIN_REP_DURATION: 600,        // Minimum time for a rep (ms) - prevents double-counting
+            DEBOUNCE_TIME: 200,           // Minimum time between state changes (ms)
+            
+            // Direction change sensitivity
+            PEAK_DROP_RATIO: 0.5,         // How much delta must drop from peak to detect reversal (0.5 = 50%)
+            DIRECTION_CONFIRM: 0.4,       // Threshold multiplier to confirm direction change
             
             // Debug
             DEBUG_ENABLED: true           // Show debug panel
@@ -1179,14 +1182,10 @@
         /*
         Process incoming motion data for rep detection
         
-        NEW APPROACH: Direction-change detection (more forgiving)
-        
-        Instead of requiring return to baseline, we detect direction changes:
-        - WAITING: Looking for significant movement to start
-        - GOING_UP: Weight moving up, tracking peak, waiting for reversal
-        - GOING_DOWN: Weight moving down, tracking peak, reversal = rep complete
-        
-        This doesn't require the weight to fully settle between reps!
+        Direction-change detection with BALANCED sensitivity:
+        - Requires clear, significant movement to start
+        - Requires definite direction reversal (not just noise)
+        - Must complete full up-down cycle
         */
         function processMotionData(rawAccel) {
             // Apply low-pass filter to smooth out noise
@@ -1195,9 +1194,8 @@
             // Calculate deviation from baseline
             const delta = state.filteredAccel - state.calibration.baselineValue;
             
-            // Smooth the direction signal even more for reliable reversal detection
-            // This prevents noise from triggering false direction changes
-            state.smoothedDirection = lowPassFilter(delta, state.smoothedDirection, 0.1);
+            // Extra smoothing for direction detection
+            state.smoothedDirection = lowPassFilter(delta, state.smoothedDirection, 0.08);
             
             const threshold = state.calibration.threshold;
             const now = Date.now();
@@ -1208,15 +1206,13 @@
             // Update visual signal bar
             updateSignalBar(delta, threshold);
 
-            // Direction-change based rep detection
             switch (state.repPhase) {
                 case 'WAITING':
                     /*
-                    Waiting for movement to begin.
-                    Start tracking when we see significant upward acceleration.
-                    (Lower threshold to be more sensitive to rep start)
+                    Waiting for clear upward movement.
+                    Require FULL threshold to be exceeded (no multiplier reduction)
                     */
-                    if (delta > threshold * 0.6) {
+                    if (delta > threshold) {
                         if (now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
                             state.repPhase = 'GOING_UP';
                             state.repStartTime = now;
@@ -1230,12 +1226,10 @@
 
                 case 'GOING_UP':
                     /*
-                    Weight is moving up. Track the peak acceleration.
-                    When we detect a reversal (delta drops significantly from peak),
-                    transition to GOING_DOWN.
-                    
-                    Key insight: We don't need delta to go negative, just to DROP
-                    from its peak by a meaningful amount.
+                    Weight is moving up. Track peak.
+                    Require CLEAR reversal - either:
+                    1. Delta dropped by PEAK_DROP_RATIO from peak AND gone below threshold
+                    2. Delta has gone clearly negative
                     */
                     
                     // Track maximum upward acceleration
@@ -1243,27 +1237,26 @@
                         state.currentPeakUp = delta;
                     }
                     
-                    // Detect reversal: smoothed direction has dropped significantly from peak
-                    // OR delta has gone negative (definitely going down now)
-                    const droppedFromPeak = state.currentPeakUp - delta > threshold * 0.8;
-                    const goneNegative = delta < -threshold * 0.3;
+                    // Calculate how much we've dropped from peak
+                    const dropFromPeak = state.currentPeakUp - delta;
+                    const dropRatio = state.currentPeakUp > 0 ? dropFromPeak / state.currentPeakUp : 0;
                     
-                    if ((droppedFromPeak || goneNegative) && 
+                    // Conditions for reversal (must meet BOTH for non-negative, OR be clearly negative)
+                    const significantDrop = dropRatio > CONFIG.PEAK_DROP_RATIO && delta < threshold * 0.7;
+                    const goneNegative = delta < -threshold * CONFIG.DIRECTION_CONFIRM;
+                    
+                    if ((significantDrop || goneNegative) && 
                         now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
                         state.repPhase = 'GOING_DOWN';
                         state.lastStateChange = now;
-                        console.log('Phase: GOING_UP -> GOING_DOWN (peak was: ' + state.currentPeakUp.toFixed(2) + ')');
+                        console.log(`Phase: GOING_UP -> GOING_DOWN (peak: ${state.currentPeakUp.toFixed(2)}, drop: ${dropRatio.toFixed(2)})`);
                     }
                     break;
 
                 case 'GOING_DOWN':
                     /*
-                    Weight is moving down. Track the peak downward acceleration.
-                    When we detect another reversal (movement starting up again),
-                    the rep is complete!
-                    
-                    This is the key difference from before: we don't wait for
-                    return to baseline, just for the direction to change again.
+                    Weight is moving down. Track the trough.
+                    Rep completes when we see clear upward movement again.
                     */
                     
                     // Track maximum downward acceleration (most negative)
@@ -1271,47 +1264,51 @@
                         state.currentPeakDown = delta;
                     }
                     
-                    // Detect reversal: delta is rising back up significantly
-                    // This means the person has started the next rep or paused
-                    const risingFromBottom = delta - state.currentPeakDown > threshold * 0.6;
-                    const backToPositive = delta > threshold * 0.4;
+                    // Calculate rise from bottom
+                    const riseFromBottom = delta - state.currentPeakDown;
                     
-                    if ((risingFromBottom || backToPositive) && 
+                    // Conditions for rep completion:
+                    // 1. Must have risen significantly from the bottom
+                    // 2. Must be clearly moving upward (past a threshold)
+                    const significantRise = riseFromBottom > threshold * 0.8;
+                    const clearlyRising = delta > threshold * CONFIG.DIRECTION_CONFIRM;
+                    
+                    if (significantRise && clearlyRising && 
                         now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
                         
                         // Check minimum rep duration
                         const repDuration = now - state.repStartTime;
                         
                         if (repDuration >= CONFIG.MIN_REP_DURATION) {
-                            // REP COMPLETE!
-                            state.repCount++;
-                            state.repTimes.push(repDuration);
+                            // Verify this was a real rep - must have seen both directions
+                            const hadUpwardPhase = state.currentPeakUp > threshold * 0.8;
+                            const hadDownwardPhase = state.currentPeakDown < -threshold * 0.3;
                             
-                            // Calculate range of motion (peak-to-peak acceleration)
-                            const range = state.currentPeakUp - state.currentPeakDown;
-                            state.repRanges.push(range);
-                            
-                            // Update max range for percentage calculations
-                            if (range > state.maxRange) {
-                                state.maxRange = range;
+                            if (hadUpwardPhase && hadDownwardPhase) {
+                                // REP COMPLETE!
+                                state.repCount++;
+                                state.repTimes.push(repDuration);
+                                
+                                // Calculate range of motion
+                                const range = state.currentPeakUp - state.currentPeakDown;
+                                state.repRanges.push(range);
+                                
+                                if (range > state.maxRange) {
+                                    state.maxRange = range;
+                                }
+                                
+                                console.log(`Rep ${state.repCount}: ${repDuration}ms, range: ${range.toFixed(2)}`);
+                                onRepComplete(state.repCount, repDuration, range);
+                            } else {
+                                console.log(`Rejected: peaks not sufficient (up: ${state.currentPeakUp.toFixed(2)}, down: ${state.currentPeakDown.toFixed(2)})`);
                             }
-                            
-                            console.log(`Rep ${state.repCount}: ${repDuration}ms, range: ${range.toFixed(2)}`);
-                            
-                            // Notify UI
-                            onRepComplete(state.repCount, repDuration, range);
                         }
                         
-                        // Transition: if we're rising, go straight to GOING_UP
-                        // This allows continuous reps without pause
-                        if (backToPositive) {
-                            state.repPhase = 'GOING_UP';
-                            state.repStartTime = now;
-                            state.currentPeakUp = delta;
-                            state.currentPeakDown = 0;
-                        } else {
-                            state.repPhase = 'WAITING';
-                        }
+                        // Start tracking next potential rep
+                        state.repPhase = 'GOING_UP';
+                        state.repStartTime = now;
+                        state.currentPeakUp = delta;
+                        state.currentPeakDown = 0;
                         state.lastStateChange = now;
                     }
                     break;
