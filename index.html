@@ -290,28 +290,34 @@
 
         .stats-row {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-            margin-bottom: 20px;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        @media (min-width: 400px) {
+            .stats-row {
+                grid-template-columns: repeat(4, 1fr);
+            }
         }
 
         .stat-card {
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
             border-radius: 12px;
-            padding: 16px;
+            padding: 12px 8px;
             text-align: center;
         }
 
         .stat-value {
-            font-size: 1.5rem;
+            font-size: 1.25rem;
             font-weight: 600;
             font-family: var(--font-mono);
             color: var(--accent-secondary);
         }
 
         .stat-label {
-            font-size: 0.75rem;
+            font-size: 0.65rem;
             color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 0.05em;
@@ -378,24 +384,30 @@
         .summary-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
+            gap: 10px;
+        }
+
+        @media (min-width: 360px) {
+            .summary-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
         }
 
         .summary-item {
             background: var(--bg-tertiary);
             border-radius: 12px;
-            padding: 16px;
+            padding: 14px 10px;
             text-align: center;
         }
 
         .summary-item-value {
-            font-size: 1.5rem;
+            font-size: 1.25rem;
             font-weight: 600;
             font-family: var(--font-mono);
         }
 
         .summary-item-label {
-            font-size: 0.75rem;
+            font-size: 0.65rem;
             color: var(--text-secondary);
             margin-top: 4px;
         }
@@ -668,6 +680,14 @@
                     <div id="avgRepTime" class="stat-value">--</div>
                     <div class="stat-label">Avg Rep (s)</div>
                 </div>
+                <div class="stat-card">
+                    <div id="lastRepRange" class="stat-value">--</div>
+                    <div class="stat-label">Last Range</div>
+                </div>
+                <div class="stat-card">
+                    <div id="avgRepRange" class="stat-value">--</div>
+                    <div class="stat-label">Avg Range</div>
+                </div>
             </div>
 
             <!-- Live signal visualization -->
@@ -721,6 +741,14 @@
                     <div class="summary-item">
                         <div id="finalSlowestRep" class="summary-item-value">--</div>
                         <div class="summary-item-label">Slowest Rep</div>
+                    </div>
+                    <div class="summary-item">
+                        <div id="finalAvgRange" class="summary-item-value">--</div>
+                        <div class="summary-item-label">Avg Range</div>
+                    </div>
+                    <div class="summary-item">
+                        <div id="finalMinRange" class="summary-item-value">--</div>
+                        <div class="summary-item-label">Min Range</div>
                     </div>
                 </div>
 
@@ -860,14 +888,21 @@
             filteredAccel: 0,             // Current filtered acceleration value
             lastRawAccel: 0,              // Last raw reading (for debug)
             
-            // Rep detection state machine
-            repState: 'IDLE',             // 'IDLE' | 'MOVING_UP' | 'MOVING_DOWN'
+            // Rep detection - direction change based (more forgiving)
+            repPhase: 'WAITING',          // 'WAITING' | 'GOING_UP' | 'GOING_DOWN'
             lastStateChange: 0,           // Timestamp of last state change (for debouncing)
             repStartTime: null,           // When current rep started
+            
+            // Peak tracking for range of motion
+            currentPeakUp: 0,             // Max positive delta this rep (upward acceleration)
+            currentPeakDown: 0,           // Max negative delta this rep (downward acceleration)
+            smoothedDirection: 0,         // Smoothed direction indicator
             
             // Rep data
             repCount: 0,
             repTimes: [],                 // Array of rep durations in ms
+            repRanges: [],                // Array of range values (peak-to-peak acceleration)
+            maxRange: 0,                  // Largest range seen (for percentage calc)
             setStartTime: null,           // When set started
             
             // Wake lock
@@ -897,6 +932,8 @@
             repCount: document.getElementById('repCount'),
             lastRepTime: document.getElementById('lastRepTime'),
             avgRepTime: document.getElementById('avgRepTime'),
+            lastRepRange: document.getElementById('lastRepRange'),
+            avgRepRange: document.getElementById('avgRepRange'),
             setTimer: document.getElementById('setTimer'),
             signalBar: document.getElementById('signalBar'),
             
@@ -906,6 +943,8 @@
             finalAvgRep: document.getElementById('finalAvgRep'),
             finalFastestRep: document.getElementById('finalFastestRep'),
             finalSlowestRep: document.getElementById('finalSlowestRep'),
+            finalAvgRange: document.getElementById('finalAvgRange'),
+            finalMinRange: document.getElementById('finalMinRange'),
             
             // Calibration
             calibrationOverlay: document.getElementById('calibrationOverlay'),
@@ -1140,26 +1179,27 @@
         /*
         Process incoming motion data for rep detection
         
-        This implements a state machine with three states:
-        - IDLE: Waiting at rest position
-        - MOVING_UP: Weight is moving upward
-        - MOVING_DOWN: Weight is moving downward
+        NEW APPROACH: Direction-change detection (more forgiving)
         
-        A complete rep is: IDLE -> MOVING_UP -> MOVING_DOWN -> IDLE
+        Instead of requiring return to baseline, we detect direction changes:
+        - WAITING: Looking for significant movement to start
+        - GOING_UP: Weight moving up, tracking peak, waiting for reversal
+        - GOING_DOWN: Weight moving down, tracking peak, reversal = rep complete
+        
+        This doesn't require the weight to fully settle between reps!
         */
         function processMotionData(rawAccel) {
             // Apply low-pass filter to smooth out noise
             state.filteredAccel = lowPassFilter(rawAccel, state.filteredAccel);
             
-            // Calculate how much we've deviated from the baseline
-            // This is the key signal we use for detection
+            // Calculate deviation from baseline
             const delta = state.filteredAccel - state.calibration.baselineValue;
             
-            // Threshold for detecting movement
-            const threshold = state.calibration.threshold;
-            const restThreshold = threshold * CONFIG.REST_THRESHOLD_MULTIPLIER;
+            // Smooth the direction signal even more for reliable reversal detection
+            // This prevents noise from triggering false direction changes
+            state.smoothedDirection = lowPassFilter(delta, state.smoothedDirection, 0.1);
             
-            // Current time for debouncing
+            const threshold = state.calibration.threshold;
             const now = Date.now();
             
             // Update debug panel
@@ -1168,67 +1208,111 @@
             // Update visual signal bar
             updateSignalBar(delta, threshold);
 
-            // State machine for rep detection
-            switch (state.repState) {
-                case 'IDLE':
+            // Direction-change based rep detection
+            switch (state.repPhase) {
+                case 'WAITING':
                     /*
-                    In IDLE state, we're waiting for the weight to start moving.
-                    When acceleration exceeds threshold, transition to MOVING_UP.
-                    
-                    Note: We check delta * axisSign to handle both orientations
-                    (phone might be upside down)
+                    Waiting for movement to begin.
+                    Start tracking when we see significant upward acceleration.
+                    (Lower threshold to be more sensitive to rep start)
                     */
-                    if (Math.abs(delta) > threshold) {
-                        // Debounce check
+                    if (delta > threshold * 0.6) {
                         if (now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
-                            state.repState = 'MOVING_UP';
+                            state.repPhase = 'GOING_UP';
                             state.repStartTime = now;
+                            state.currentPeakUp = delta;
+                            state.currentPeakDown = 0;
                             state.lastStateChange = now;
-                            console.log('State: IDLE -> MOVING_UP');
+                            console.log('Phase: WAITING -> GOING_UP');
                         }
                     }
                     break;
 
-                case 'MOVING_UP':
+                case 'GOING_UP':
                     /*
-                    Weight is moving up. We're looking for the direction change
-                    that indicates we've reached the top and started coming down.
+                    Weight is moving up. Track the peak acceleration.
+                    When we detect a reversal (delta drops significantly from peak),
+                    transition to GOING_DOWN.
                     
-                    The sign of delta will flip when this happens.
+                    Key insight: We don't need delta to go negative, just to DROP
+                    from its peak by a meaningful amount.
                     */
-                    if (delta * state.calibration.axisSign < -threshold * 0.5) {
-                        if (now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
-                            state.repState = 'MOVING_DOWN';
-                            state.lastStateChange = now;
-                            console.log('State: MOVING_UP -> MOVING_DOWN');
-                        }
+                    
+                    // Track maximum upward acceleration
+                    if (delta > state.currentPeakUp) {
+                        state.currentPeakUp = delta;
+                    }
+                    
+                    // Detect reversal: smoothed direction has dropped significantly from peak
+                    // OR delta has gone negative (definitely going down now)
+                    const droppedFromPeak = state.currentPeakUp - delta > threshold * 0.8;
+                    const goneNegative = delta < -threshold * 0.3;
+                    
+                    if ((droppedFromPeak || goneNegative) && 
+                        now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
+                        state.repPhase = 'GOING_DOWN';
+                        state.lastStateChange = now;
+                        console.log('Phase: GOING_UP -> GOING_DOWN (peak was: ' + state.currentPeakUp.toFixed(2) + ')');
                     }
                     break;
 
-                case 'MOVING_DOWN':
+                case 'GOING_DOWN':
                     /*
-                    Weight is moving down. We're looking for return to rest
-                    (small delta) which completes the rep.
+                    Weight is moving down. Track the peak downward acceleration.
+                    When we detect another reversal (movement starting up again),
+                    the rep is complete!
+                    
+                    This is the key difference from before: we don't wait for
+                    return to baseline, just for the direction to change again.
                     */
-                    if (Math.abs(delta) < restThreshold) {
-                        // Check minimum rep duration to avoid false positives
+                    
+                    // Track maximum downward acceleration (most negative)
+                    if (delta < state.currentPeakDown) {
+                        state.currentPeakDown = delta;
+                    }
+                    
+                    // Detect reversal: delta is rising back up significantly
+                    // This means the person has started the next rep or paused
+                    const risingFromBottom = delta - state.currentPeakDown > threshold * 0.6;
+                    const backToPositive = delta > threshold * 0.4;
+                    
+                    if ((risingFromBottom || backToPositive) && 
+                        now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
+                        
+                        // Check minimum rep duration
                         const repDuration = now - state.repStartTime;
                         
-                        if (repDuration >= CONFIG.MIN_REP_DURATION && 
-                            now - state.lastStateChange > CONFIG.DEBOUNCE_TIME) {
+                        if (repDuration >= CONFIG.MIN_REP_DURATION) {
                             // REP COMPLETE!
-                            state.repState = 'IDLE';
-                            state.lastStateChange = now;
-                            
-                            // Record the rep
                             state.repCount++;
                             state.repTimes.push(repDuration);
                             
-                            console.log(`Rep ${state.repCount} complete: ${repDuration}ms`);
+                            // Calculate range of motion (peak-to-peak acceleration)
+                            const range = state.currentPeakUp - state.currentPeakDown;
+                            state.repRanges.push(range);
                             
-                            // Update UI
-                            onRepComplete(state.repCount, repDuration);
+                            // Update max range for percentage calculations
+                            if (range > state.maxRange) {
+                                state.maxRange = range;
+                            }
+                            
+                            console.log(`Rep ${state.repCount}: ${repDuration}ms, range: ${range.toFixed(2)}`);
+                            
+                            // Notify UI
+                            onRepComplete(state.repCount, repDuration, range);
                         }
+                        
+                        // Transition: if we're rising, go straight to GOING_UP
+                        // This allows continuous reps without pause
+                        if (backToPositive) {
+                            state.repPhase = 'GOING_UP';
+                            state.repStartTime = now;
+                            state.currentPeakUp = delta;
+                            state.currentPeakDown = 0;
+                        } else {
+                            state.repPhase = 'WAITING';
+                        }
+                        state.lastStateChange = now;
                     }
                     break;
             }
@@ -1238,11 +1322,11 @@
         Called when a rep is successfully detected
         Updates all the UI elements and chart
         */
-        function onRepComplete(repNumber, durationMs) {
+        function onRepComplete(repNumber, durationMs, range) {
             // Haptic feedback
             hapticFeedback(100);
             
-            // Update rep count display
+            // Update rep count display with animation
             DOM.repCount.textContent = repNumber;
             DOM.repCount.style.transform = 'scale(1.1)';
             setTimeout(() => DOM.repCount.style.transform = 'scale(1)', 150);
@@ -1254,8 +1338,26 @@
             const avgMs = average(state.repTimes);
             DOM.avgRepTime.textContent = formatSeconds(avgMs);
             
-            // Update chart
-            updateRepChart(repNumber, durationMs);
+            // Update range display (as percentage of max range)
+            const rangePercent = state.maxRange > 0 ? Math.round((range / state.maxRange) * 100) : 100;
+            DOM.lastRepRange.textContent = `${rangePercent}%`;
+            
+            // Color code range (green = full, yellow = partial, red = very short)
+            if (rangePercent >= 85) {
+                DOM.lastRepRange.style.color = 'var(--accent-primary)';
+            } else if (rangePercent >= 60) {
+                DOM.lastRepRange.style.color = 'var(--accent-warning)';
+            } else {
+                DOM.lastRepRange.style.color = 'var(--accent-danger)';
+            }
+            
+            // Update average range
+            const avgRange = average(state.repRanges);
+            const avgRangePercent = state.maxRange > 0 ? Math.round((avgRange / state.maxRange) * 100) : 100;
+            DOM.avgRepRange.textContent = `${avgRangePercent}%`;
+            
+            // Update chart with both time and range
+            updateRepChart(repNumber, durationMs, rangePercent);
         }
 
         // ============================================================
@@ -1271,13 +1373,13 @@
             DOM.debugRawAccel.textContent = raw.toFixed(2);
             DOM.debugFilteredAccel.textContent = filtered.toFixed(2);
             DOM.debugDelta.textContent = delta.toFixed(2);
-            DOM.debugState.textContent = state.repState;
+            DOM.debugState.textContent = state.repPhase;
             
             // Color code the delta
             DOM.debugDelta.className = 'debug-value';
-            if (delta > state.calibration.threshold) {
+            if (delta > state.calibration.threshold * 0.6) {
                 DOM.debugDelta.classList.add('positive');
-            } else if (delta < -state.calibration.threshold) {
+            } else if (delta < -state.calibration.threshold * 0.3) {
                 DOM.debugDelta.classList.add('negative');
             }
         }
@@ -1325,6 +1427,7 @@
 
         /*
         Initialize the rep chart (tracking screen)
+        Shows both rep time (bars) and range percentage (line)
         */
         function initRepChart() {
             const ctx = document.getElementById('repChart').getContext('2d');
@@ -1333,21 +1436,47 @@
                 type: 'bar',
                 data: {
                     labels: [],
-                    datasets: [{
-                        label: 'Rep Time (s)',
-                        data: [],
-                        backgroundColor: 'rgba(0, 255, 136, 0.6)',
-                        borderColor: 'rgba(0, 255, 136, 1)',
-                        borderWidth: 1
-                    }]
+                    datasets: [
+                        {
+                            label: 'Rep Time (s)',
+                            data: [],
+                            backgroundColor: 'rgba(0, 255, 136, 0.6)',
+                            borderColor: 'rgba(0, 255, 136, 1)',
+                            borderWidth: 1,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'Range %',
+                            data: [],
+                            type: 'line',
+                            borderColor: 'rgba(0, 204, 255, 1)',
+                            backgroundColor: 'rgba(0, 204, 255, 0.2)',
+                            borderWidth: 2,
+                            pointRadius: 4,
+                            pointBackgroundColor: 'rgba(0, 204, 255, 1)',
+                            fill: false,
+                            tension: 0.3,
+                            yAxisID: 'y1'
+                        }
+                    ]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    animation: false, // Disable for performance
+                    animation: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
                     plugins: {
                         legend: {
-                            display: false
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                color: '#888',
+                                boxWidth: 12,
+                                padding: 8
+                            }
                         }
                     },
                     scales: {
@@ -1360,17 +1489,41 @@
                             }
                         },
                         y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
                             beginAtZero: true,
                             grid: {
                                 color: 'rgba(255, 255, 255, 0.1)'
                             },
                             ticks: {
-                                color: '#888'
+                                color: '#00ff88'
                             },
                             title: {
                                 display: true,
-                                text: 'Seconds',
-                                color: '#888'
+                                text: 'Time (s)',
+                                color: '#00ff88'
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            min: 0,
+                            max: 120,
+                            grid: {
+                                drawOnChartArea: false
+                            },
+                            ticks: {
+                                color: '#00ccff',
+                                callback: function(value) {
+                                    return value + '%';
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: 'Range',
+                                color: '#00ccff'
                             }
                         }
                     }
@@ -1381,10 +1534,11 @@
         /*
         Add a new rep to the chart
         */
-        function updateRepChart(repNumber, durationMs) {
+        function updateRepChart(repNumber, durationMs, rangePercent) {
             repChart.data.labels.push(`${repNumber}`);
             repChart.data.datasets[0].data.push(durationMs / 1000);
-            repChart.update('none'); // 'none' = no animation
+            repChart.data.datasets[1].data.push(rangePercent);
+            repChart.update('none');
         }
 
         /*
@@ -1393,11 +1547,13 @@
         function resetRepChart() {
             repChart.data.labels = [];
             repChart.data.datasets[0].data = [];
+            repChart.data.datasets[1].data = [];
             repChart.update();
         }
 
         /*
         Initialize/update the results chart
+        Shows both rep time and range percentage
         */
         function updateResultsChart() {
             const ctx = document.getElementById('resultsChart').getContext('2d');
@@ -1407,25 +1563,52 @@
                 resultsChart.destroy();
             }
             
+            // Calculate range percentages
+            const rangePercents = state.repRanges.map(r => 
+                state.maxRange > 0 ? Math.round((r / state.maxRange) * 100) : 100
+            );
+            
             resultsChart = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: state.repTimes.map((_, i) => `Rep ${i + 1}`),
-                    datasets: [{
-                        label: 'Rep Time (s)',
-                        data: state.repTimes.map(t => t / 1000),
-                        borderColor: 'rgba(0, 204, 255, 1)',
-                        backgroundColor: 'rgba(0, 204, 255, 0.2)',
-                        fill: true,
-                        tension: 0.3
-                    }]
+                    datasets: [
+                        {
+                            label: 'Time (s)',
+                            data: state.repTimes.map(t => t / 1000),
+                            borderColor: 'rgba(0, 255, 136, 1)',
+                            backgroundColor: 'rgba(0, 255, 136, 0.2)',
+                            fill: true,
+                            tension: 0.3,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'Range %',
+                            data: rangePercents,
+                            borderColor: 'rgba(0, 204, 255, 1)',
+                            backgroundColor: 'rgba(0, 204, 255, 0.1)',
+                            fill: true,
+                            tension: 0.3,
+                            yAxisID: 'y1'
+                        }
+                    ]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
                     plugins: {
                         legend: {
-                            display: false
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                color: '#888',
+                                boxWidth: 12,
+                                padding: 8
+                            }
                         }
                     },
                     scales: {
@@ -1438,11 +1621,40 @@
                             }
                         },
                         y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
                             grid: {
                                 color: 'rgba(255, 255, 255, 0.1)'
                             },
                             ticks: {
-                                color: '#888'
+                                color: '#00ff88'
+                            },
+                            title: {
+                                display: true,
+                                text: 'Time (s)',
+                                color: '#00ff88'
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            min: 0,
+                            max: 120,
+                            grid: {
+                                drawOnChartArea: false
+                            },
+                            ticks: {
+                                color: '#00ccff',
+                                callback: function(value) {
+                                    return value + '%';
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: 'Range',
+                                color: '#00ccff'
                             }
                         }
                     }
@@ -1524,13 +1736,21 @@
             // Reset state for new set
             state.repCount = 0;
             state.repTimes = [];
-            state.repState = 'IDLE';
+            state.repRanges = [];
+            state.maxRange = 0;
+            state.repPhase = 'WAITING';
+            state.currentPeakUp = 0;
+            state.currentPeakDown = 0;
+            state.smoothedDirection = 0;
             state.filteredAccel = state.calibration.baselineValue;
             
             // Reset UI
             DOM.repCount.textContent = '0';
             DOM.lastRepTime.textContent = '--';
             DOM.avgRepTime.textContent = '--';
+            DOM.lastRepRange.textContent = '--';
+            DOM.avgRepRange.textContent = '--';
+            DOM.lastRepRange.style.color = 'var(--accent-secondary)';
             resetRepChart();
 
             // Start tracking
@@ -1556,12 +1776,21 @@
             const fastestRep = state.repTimes.length > 0 ? Math.min(...state.repTimes) : 0;
             const slowestRep = state.repTimes.length > 0 ? Math.max(...state.repTimes) : 0;
             
+            // Calculate range stats (as percentages of max)
+            const rangePercents = state.repRanges.map(r => 
+                state.maxRange > 0 ? Math.round((r / state.maxRange) * 100) : 100
+            );
+            const avgRangePercent = rangePercents.length > 0 ? Math.round(average(rangePercents)) : 0;
+            const minRangePercent = rangePercents.length > 0 ? Math.min(...rangePercents) : 0;
+            
             // Update results screen
             DOM.finalRepCount.textContent = state.repCount;
             DOM.finalSetDuration.textContent = formatTime(setDuration);
             DOM.finalAvgRep.textContent = state.repTimes.length > 0 ? `${formatSeconds(avgRepTime)}s` : '--';
             DOM.finalFastestRep.textContent = state.repTimes.length > 0 ? `${formatSeconds(fastestRep)}s` : '--';
             DOM.finalSlowestRep.textContent = state.repTimes.length > 0 ? `${formatSeconds(slowestRep)}s` : '--';
+            DOM.finalAvgRange.textContent = state.repRanges.length > 0 ? `${avgRangePercent}%` : '--';
+            DOM.finalMinRange.textContent = state.repRanges.length > 0 ? `${minRangePercent}%` : '--';
             
             // Update results chart
             updateResultsChart();
